@@ -219,9 +219,14 @@ Done & validated against the real checkpoint:
   (`FLUX2_PLUSATTN, T=3, rank=64, comm=1, text_teammate=1`, roster+ids correct).
 - `teamwork(3/n)`: `parse_teamwork_key()` in `teamwork.hpp` — diffusers→internal FLUX2 map.
   ✅ all 169 tensors map, 0 unrecognized.
+- `teamwork(4/n)`: `sd_teamwork_lora_delta()` GGML kernel in `model/adapter/teamwork_adapter.hpp`
+  + CPU unit test `tests/teamwork_kernel_test.cpp`. ✅ PASS (max err 1.975e-06 vs C++ reference,
+  with N=2 batch + text tokens + communication). This is the validated M2 core (per-teammate
+  down → shared-hidden sum → per-teammate up, teammate-major image blocks, text→teammate slice).
+  Build the test with the §3 standalone recipe (ggml libs only; add `-Iggml/include` for `ggml-cpu.h`).
 
-Milestones (task list): M0 substrate ✅ | M1 loading (in progress) | M2 LoRA engine | M3
-wiring+modulation | M4 e2e harness+parity | M5 generality.
+Milestones (task list): M0 substrate ✅ | M1 loading (naming+config+kernel ✅; loader+CLI next) |
+M2 LoRA engine (kernel ✅; adapter integration next) | M3 wiring+modulation | M4 e2e | M5 generality.
 
 ---
 
@@ -253,6 +258,15 @@ wiring+modulation | M4 e2e harness+parity | M5 generality.
 - Small path/CLI: base Klein + `--teamwork` + source.png + mask.png + prompt → edited.png
   (harness maps teammate-name → ref order: refs = [source, mask]). Compare to golden `edited.png`
   + latents within epsilon. Bar: visually correct + kernel-tolerance, not bit-exact.
+
+### Deferred (YAGNI, noted in `teamwork_adapter.hpp`)
+- **General per-token teammate/position ids** (arbitrary token→teammate + scatter/gather
+  communication): not built — no motivating case, scatter/gather slow. The kernel hard-codes
+  the `[text | T equal image blocks]` ViT layout. Revisit for irregular/interleaved teammates.
+- **Matmul fusion:** the T looped down/up matmuls can become batched matmuls over the teammate
+  axis (`[in,L,T,N]` + ggml ne2 batching); communicating down+sum can collapse to one matmul via
+  concatenated teammate features (`D_cat [in*T, r]`). Benefit scales with T (modest at T=3, real
+  for large-T SVBRDF); adds reshape/permute cost — benchmark first.
 
 ### M5 — generality (later)
 - `attn_allow` masking; teammate present/deactivation; FLUX1_PLUSATTN; text2img RGB→X/SVBRDF
