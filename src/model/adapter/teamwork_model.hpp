@@ -186,9 +186,17 @@ struct TeamworkModel : public GGMLRunner {
         if (it == layers.end()) {
             return nullptr;
         }
-        // TODO(M3): modulation layers need per-teammate modulation handling; skip for now.
+        // Modulation linears take the shared timestep vector (x = SiLU(vec), [in, 1]) with
+        // no token axis, but teamwork wants a per-teammate output. Replicate x to T "tokens"
+        // (L=1, teammate-major, no text) so the same kernel yields the per-teammate delta
+        // [out, T]; the flux modulate() path then applies each teammate's mod to its block.
         if (contains(layer, "modulation")) {
-            return nullptr;
+            const SubProj& sub = it->second.subs[0];  // modulation lin is a single fused proj
+            ggml_tensor* xr    = ggml_repeat(ctx, x,
+                                             ggml_new_tensor_3d(ctx, x->type, x->ne[0], layout.T, x->ne[2]));
+            return sd_teamwork_lora_delta(ctx, xr, sub.down, sub.up,
+                                          /*n_txt=*/0, layout.T, layout.text_teammate,
+                                          layout.communication);
         }
         const bool is_single = starts_with(layer, "single_blocks.");
         const int n_txt      = is_single ? layout.n_txt : 0;
@@ -234,13 +242,28 @@ struct TeamworkAdapter : public WeightAdapter {
         }
         ggml_tensor* diff = model->get_out_diff(ctx, x, prefix);
         if (diff != nullptr) {
-            out = ggml_add_inplace(ctx, out, diff);
+            // Modulation delta is per-teammate [out, T] while the shared base out is [out, 1];
+            // broadcast base over the teammate axis before adding. Token-axis deltas match 1:1.
+            if (diff->ne[1] != out->ne[1]) {
+                out = ggml_repeat(ctx, out, diff);
+            }
+            out = ggml_add(ctx, out, diff);
         }
         return out;
     }
 
     size_t get_extra_graph_size() override {
         return 10240 + model->raw_tensors.size() * 20;
+    }
+
+    bool get_teammate_modulation(int& T, int& n_txt, int& text_teammate) override {
+        if (!model->layout.valid) {
+            return false;
+        }
+        T             = model->layout.T;
+        n_txt         = model->layout.n_txt;
+        text_teammate = model->layout.text_teammate;
+        return true;
     }
 
     // Activate the communicating-LoRA layout for this graph build. n_ref_latents comes

@@ -1685,6 +1685,15 @@ struct WeightAdapter {
         (void)n_ref_latents;
         (void)n_txt;
     }
+    // Returns true (and fills T / n_txt / text_teammate) when per-teammate modulation is
+    // active, so blocks apply each teammate's shift/scale/gate to its own token block.
+    // Non-teamwork adapters return false → standard shared modulation. See flux.hpp.
+    virtual bool get_teammate_modulation(int& T, int& n_txt, int& text_teammate) {
+        (void)T;
+        (void)n_txt;
+        (void)text_teammate;
+        return false;
+    }
 };
 
 struct GGMLRunnerContext {

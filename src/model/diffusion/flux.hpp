@@ -395,9 +395,11 @@ namespace Flux {
             auto lin = std::dynamic_pointer_cast<Linear>(blocks["lin"]);
 
             auto out = ggml_silu(ctx->ggml_ctx, vec);
-            out      = lin->forward(ctx, out);  // [N, multiplier*dim]
+            out      = lin->forward(ctx, out);  // [N, multiplier*dim]  (teamwork: N->T per-teammate)
 
-            auto m = ggml_reshape_3d(ctx->ggml_ctx, out, vec->ne[0], multiplier, vec->ne[1]);  // [N, multiplier, dim]
+            // out->ne[1] is N normally; with teamwork per-teammate modulation the adapter
+            // widens it to T, so the shift/scale/gate views below become per-teammate [dim, T].
+            auto m = ggml_reshape_3d(ctx->ggml_ctx, out, vec->ne[0], multiplier, out->ne[1]);  // [N, multiplier, dim]
             m      = ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, m, 0, 2, 1, 3));     // [multiplier, N, dim]
 
             ModulationOut m_0 = ModulationOut(ctx, m, 0);
@@ -424,6 +426,71 @@ namespace Flux {
         x = ggml_add(ctx, x, ggml_mul(ctx, x, scale));
         x = ggml_add(ctx, x, shift);
         return x;
+    }
+
+    // --- Teamwork per-teammate modulation ------------------------------------------------
+    // With teamwork, a shared modulation linear produces a per-teammate param p [C, T]
+    // instead of [C, 1]. These helpers expand p to a per-token param and apply it, so each
+    // teammate's token block gets its own shift/scale/gate. They fall back to the standard
+    // shared modulation when teamwork is inactive (tw=false) or the param is not per-teammate
+    // (p->ne[1] != T, e.g. an un-adapted modulation such as the double-block txt stream).
+
+    // Expand p [C, T] into a per-token param [C, Ltot, 1]: the first n_txt tokens take
+    // teammate `text_teammate`; the remaining Ltot-n_txt image tokens are T contiguous equal
+    // blocks in teammate-index order (mirrors sd_teamwork_lora_delta's token layout).
+    __STATIC_INLINE__ ggml_tensor* build_teammate_param(ggml_context* ctx,
+                                                        ggml_tensor* p,
+                                                        int64_t Ltot,
+                                                        int n_txt,
+                                                        int T,
+                                                        int text_teammate) {
+        p                 = ggml_cont(ctx, p);
+        int64_t C         = p->ne[0];
+        int64_t L_img     = (Ltot - n_txt) / T;
+        ggml_tensor* pimg = ggml_reshape_3d(ctx, p, C, 1, T);                                    // [C,1,T]
+        pimg              = ggml_repeat(ctx, pimg, ggml_new_tensor_3d(ctx, p->type, C, L_img, T));  // [C,L_img,T]
+        pimg              = ggml_reshape_2d(ctx, ggml_cont(ctx, pimg), C, T * L_img);             // [C, T*L] teammate-major
+        if (n_txt > 0) {
+            ggml_tensor* ptxt = ggml_view_2d(ctx, p, C, 1, p->nb[1], (size_t)text_teammate * p->nb[1]);  // [C,1]
+            ptxt              = ggml_repeat(ctx, ptxt, ggml_new_tensor_2d(ctx, p->type, C, n_txt));       // [C,n_txt]
+            return ggml_concat(ctx, ptxt, pimg, 1);                                                       // [C, Ltot]
+        }
+        return pimg;
+    }
+
+    __STATIC_INLINE__ ggml_tensor* modulate_tw(ggml_context* ctx,
+                                               ggml_tensor* x,
+                                               ggml_tensor* shift,
+                                               ggml_tensor* scale,
+                                               bool tw,
+                                               int n_txt,
+                                               int T,
+                                               int text_teammate) {
+        if (!tw || scale->ne[1] != T) {
+            return modulate(ctx, x, shift, scale);
+        }
+        ggml_tensor* s = build_teammate_param(ctx, scale, x->ne[1], n_txt, T, text_teammate);  // [C, Ltot]
+        ggml_tensor* h = build_teammate_param(ctx, shift, x->ne[1], n_txt, T, text_teammate);
+        s              = ggml_reshape_3d(ctx, s, s->ne[0], s->ne[1], 1);
+        h              = ggml_reshape_3d(ctx, h, h->ne[0], h->ne[1], 1);
+        x              = ggml_add(ctx, x, ggml_mul(ctx, x, s));
+        x              = ggml_add(ctx, x, h);
+        return x;
+    }
+
+    __STATIC_INLINE__ ggml_tensor* gate_tw(ggml_context* ctx,
+                                           ggml_tensor* y,
+                                           ggml_tensor* gate,
+                                           bool tw,
+                                           int n_txt,
+                                           int T,
+                                           int text_teammate) {
+        if (!tw || gate->ne[1] != T) {
+            return ggml_mul(ctx, y, gate);
+        }
+        ggml_tensor* g = build_teammate_param(ctx, gate, y->ne[1], n_txt, T, text_teammate);  // [C, Ltot]
+        g              = ggml_reshape_3d(ctx, g, g->ne[0], g->ne[1], 1);
+        return ggml_mul(ctx, y, g);
     }
 
     struct DoubleStreamBlock : public GGMLBlock {
@@ -534,9 +601,14 @@ namespace Flux {
             ModulationOut txt_mod1 = txt_mods[0];
             ModulationOut txt_mod2 = txt_mods[1];
 
+            // Teamwork: img modulation is per-teammate (image stream = T equal blocks, no text);
+            // the txt stream is never teamwork-adapted so it keeps standard shared modulation.
+            int tw_T = 1, tw_ntxt = 0, tw_txtmate = 0;
+            bool tw  = ctx->weight_adapter && ctx->weight_adapter->get_teammate_modulation(tw_T, tw_ntxt, tw_txtmate);
+
             // prepare image for attention
             auto img_modulated = img_norm1->forward(ctx, img);
-            img_modulated      = Flux::modulate(ctx->ggml_ctx, img_modulated, img_mod1.shift, img_mod1.scale);
+            img_modulated      = Flux::modulate_tw(ctx->ggml_ctx, img_modulated, img_mod1.shift, img_mod1.scale, tw, 0, tw_T, tw_txtmate);
             auto img_qkv       = img_attn->pre_attention(ctx, img_modulated);  // q,k,v: [N, n_img_token, n_head, d_head]
             auto img_q         = img_qkv[0];
             auto img_k         = img_qkv[1];
@@ -574,11 +646,11 @@ namespace Flux {
                                              txt->ne[1] * attn->nb[1]);  // [N, n_img_token, hidden_size]
 
             // calculate the img bloks
-            img = ggml_add(ctx->ggml_ctx, img, ggml_mul(ctx->ggml_ctx, img_attn->post_attention(ctx, img_attn_out), img_mod1.gate));
+            img = ggml_add(ctx->ggml_ctx, img, Flux::gate_tw(ctx->ggml_ctx, img_attn->post_attention(ctx, img_attn_out), img_mod1.gate, tw, 0, tw_T, tw_txtmate));
 
-            auto img_mlp_out = img_mlp->forward(ctx, Flux::modulate(ctx->ggml_ctx, img_norm2->forward(ctx, img), img_mod2.shift, img_mod2.scale));
+            auto img_mlp_out = img_mlp->forward(ctx, Flux::modulate_tw(ctx->ggml_ctx, img_norm2->forward(ctx, img), img_mod2.shift, img_mod2.scale, tw, 0, tw_T, tw_txtmate));
 
-            img = ggml_add(ctx->ggml_ctx, img, ggml_mul(ctx->ggml_ctx, img_mlp_out, img_mod2.gate));
+            img = ggml_add(ctx->ggml_ctx, img, Flux::gate_tw(ctx->ggml_ctx, img_mlp_out, img_mod2.gate, tw, 0, tw_T, tw_txtmate));
 
             // calculate the txt bloks
             txt = ggml_add(ctx->ggml_ctx, txt, ggml_mul(ctx->ggml_ctx, txt_attn->post_attention(ctx, txt_attn_out), txt_mod1.gate));
@@ -666,7 +738,12 @@ namespace Flux {
                 }
             }
 
-            auto x_mod   = Flux::modulate(ctx->ggml_ctx, pre_norm->forward(ctx, x), mod.shift, mod.scale);
+            // Teamwork: single-block stream is [text(n_txt) | T image blocks]; text tokens use
+            // teammate `text_teammate`, image tokens their own teammate (see build_teammate_param).
+            int tw_T = 1, tw_ntxt = 0, tw_txtmate = 0;
+            bool tw  = ctx->weight_adapter && ctx->weight_adapter->get_teammate_modulation(tw_T, tw_ntxt, tw_txtmate);
+
+            auto x_mod   = Flux::modulate_tw(ctx->ggml_ctx, pre_norm->forward(ctx, x), mod.shift, mod.scale, tw, tw_ntxt, tw_T, tw_txtmate);
             auto qkv_mlp = linear1->forward(ctx, x_mod);  // [N, n_token, hidden_size * 3 + mlp_hidden_dim*mlp_mult_factor]
 
             int64_t head_dim = hidden_size / num_heads;
@@ -693,7 +770,7 @@ namespace Flux {
             auto attn_mlp = ggml_concat(ctx->ggml_ctx, attn, mlp, 0);  // [N, n_token, hidden_size + mlp_hidden_dim]
             auto output   = linear2->forward(ctx, attn_mlp);           // [N, n_token, hidden_size]
 
-            output = ggml_add(ctx->ggml_ctx, x, ggml_mul(ctx->ggml_ctx, output, mod.gate));
+            output = ggml_add(ctx->ggml_ctx, x, Flux::gate_tw(ctx->ggml_ctx, output, mod.gate, tw, tw_ntxt, tw_T, tw_txtmate));
             return output;
         }
     };

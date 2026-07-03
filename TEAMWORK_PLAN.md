@@ -236,7 +236,7 @@ Done & validated against the real checkpoint:
   down → shared-hidden sum → per-teammate up, teammate-major image blocks, text→teammate slice).
   Build the test with the §3 standalone recipe (ggml libs only; add `-Iggml/include` for `ggml-cpu.h`).
 
-- `teamwork(6/n)`: **M3 layout wiring — delta now ACTIVE & validated.** Added
+- `teamwork(5/n, folded)`: **M3 layout wiring — delta now ACTIVE & validated.** Added
   `WeightAdapter::set_sequence_layout(n_ref_latents, n_txt)` virtual hook (`ggml_extend.hpp`, no-op
   default; LoRA ignores it). `FluxRunner::build_graph` (flux.hpp ~1511) calls it each build with
   `ref_latents.size()` + `context->ne[1]`; `TeamworkAdapter::set_sequence_layout` builds a valid
@@ -249,9 +249,8 @@ Done & validated against the real checkpoint:
   output vs base-no-teamwork: 100% pixels changed, mean |Δ|=9.6/255; (c) blue-apple edit matches
   golden `edited.png` closely. Pixel-level e2e vs golden (~19 MAE) is a WEAK metric (Q8 quant +
   different VAE/sampler path), barely better than base — do NOT use it as the parity bar; use
-  per-layer delta capture (M4). **Still TODO in M3: per-teammate modulation** (get_out_diff still
-  bails on `modulation` layers; quality already good without it per measure-first fallback).
-  **PER-LAYER PARITY DONE (double-block attn):** offline check `<scratchpad>/teamwork_delta_parity.py`
+  per-layer delta capture (M4).
+  **PER-LAYER PARITY (double-block attn):** offline check `<scratchpad>/teamwork_delta_parity.py`
   reproduces the golden block-0 delta from checkpoint down/up + golden x using the sd.cpp teammate
   order [edited=t0, source=t1, mask=t2] with golden batch↔teammate remap [1,2,0]: to_q rel=1.05%,
   to_k=0.81%, to_v=2.34% (residual = bf16 rounding). WRONG-order control = 123% → the remap is
@@ -259,25 +258,42 @@ Done & validated against the real checkpoint:
   → sd.cpp feeds kernel exact layout (768/1280) in that order. Single-block `to_qkv_mlp_proj` +
   modulation deltas still un-checked (M4 leftovers).
 
-Milestones: M0 substrate ✅ | M1 loading ✅ (config+naming+loader+`--teamwork` CLI, loads&attaches
-end-to-end) | M2 engine ✅ (kernel validated + integrated as `TeamworkAdapter`) | **M3 layout wiring ✅
-(delta active + layout validated); per-teammate modulation still pending** | M4 e2e parity vs golden
-dump (per-layer delta capture) | M5 generality.
+- `teamwork(6/n)`: **per-teammate modulation — DONE & validated (M3 complete).** The shared
+  modulation linears (`double_stream_modulation_img.lin`, `single_stream_modulation.lin`) take the
+  timestep vec (no token axis) but Teamwork wants per-teammate shift/scale/gate. Implementation
+  REUSES the validated kernel: `get_out_diff` replicates the vec to T "tokens" (L=1, teammate-major,
+  n_txt=0) → `sd_teamwork_lora_delta` yields per-teammate delta `[out,T]`; `forward_with_lora`
+  broadcasts the shared base `[out,1]` to `[out,T]` before adding. `Modulation::forward` reshapes on
+  `out->ne[1]` (=T) so ModulationOut shift/scale/gate become `[dim,T]`. New guarded helpers in
+  flux.hpp — `build_teammate_param` / `modulate_tw` / `gate_tw` — expand `[dim,T]` to per-token
+  ([text→text_teammate | T image blocks]) and apply; they fall back to standard shared `modulate()`
+  when teamwork inactive or param not per-teammate (`ne[1]!=T`, e.g. un-adapted double-block txt).
+  New `WeightAdapter::get_teammate_modulation(T,n_txt,text_teammate)` hook (false default) gates it.
+  Applied at 4 double-block img sites (n_txt=0) + 2 single-block sites (n_txt=layout.n_txt). Double
+  txt stream stays shared (never adapted). **PARITY (offline, `teamwork_delta_parity.py`):** double
+  modulation all 6 chunks rel 0.7–6.2% ✓; single shift/scale 0.8%/1.6% ✓. Single GATE chunk shows
+  33% BUT that is a golden-dump artifact, NOT a bug: golden delta = `bf16(base+lora)-bf16(base)` and
+  the FLUX2 gate base ≈10.8 so its bf16 ULP (0.059) is 1.33× the delta (0.044) → the reference delta
+  there is rounding noise (ulp/|delta|>0.5 flagged in the script). The C++ path is provably identical
+  to Python `teamwork/linear.py` (comm sum → per-teammate up with `sel()`=teammate_indices remap).
+  e2e still a clean blue-apple edit. Non-teamwork models unaffected (all paths guarded).
+
+Milestones: M0 substrate ✅ | M1 loading ✅ | M2 engine ✅ (kernel validated) | **M3 ✅ COMPLETE**
+(layout wiring + per-teammate modulation, delta active & per-layer parity validated for double-attn
+1–2%, modulation double 0.7–6% / single shift-scale <2%; single-gate golden is bf16-noise so
+skipped) | M4 e2e parity vs golden (single-block `to_qkv_mlp_proj` capture still un-done; pixel e2e
+too noisy) | M5 generality.
 
 ### M3 layout wiring — DONE ✅ (see teamwork(6/n) above)
 Layout is wired via `WeightAdapter::set_sequence_layout` (called from `FluxRunner::build_graph`) →
 `TeamworkAdapter::set_sequence_layout` → `TeamworkModel::set_layout({valid=true,...})`. Delta is
 active; token layout validated (DOUBLE 768 image-only, SINGLE 512+768). Prefix-strip gotcha fixed.
 
-### START HERE (next session): finish M3 modulation, then M4 parity
-1. **Per-teammate modulation** (only remaining M3 item). `get_out_diff` still early-returns on any
-   `modulation` layer. `double_stream_modulation_img.lin` / `single_stream_modulation.lin` take the
-   shared timestep vec (no token axis) but Teamwork wants per-teammate shift/scale/gate. Output must
-   become per-teammate and `modulate()` (flux.hpp ~412) must apply each teammate's mod to its own
-   token block. Klein `share_modulation=True` → one injection point. Golden dump has the target
-   deltas (`double_stream_modulation_img.linear.{x,delta}` [3,·]). Quality already good WITHOUT it
-   (measure-first), so this is a refinement — decide whether it's worth the flux.hpp surgery.
-2. **M4 per-layer parity** (the real correctness bar; pixel e2e is too noisy — see teamwork(6/n)).
+### START HERE (next session): M4 parity + generality
+M3 is COMPLETE (layout wiring + per-teammate modulation, both parity-validated — see teamwork(5/6 n)
+above). Remaining:
+1. **M4 single-block delta parity** (the one un-checked adapted layer type; the real correctness bar,
+   pixel e2e is too noisy — see teamwork(6/n)).
    Use `GGMLRunnerContext::capture_tensor` to dump C++ block-0 deltas for `double_blocks.0.img_attn.qkv`
    (split into q/k/v, each [3072,768]) and `single_blocks.0.linear1`, then compare to golden
    `double.block0.attn.to_{q,k,v}.delta` [3,256,3072] and `single.block0...to_qkv_mlp_proj.delta`.
