@@ -123,4 +123,115 @@ struct TeamworkConfig {
     }
 };
 
+// Parsed identity of a teamwork checkpoint tensor key.
+//
+// Teamwork keys use the diffusers module tree, e.g.
+//   transformer_blocks.0.attn.to_q.adapter.down
+//   single_transformer_blocks.0.attn.to_qkv_mlp_proj.adapter.up
+//   double_stream_modulation_img.linear.adapter.down
+//   single_transformer_blocks.0.adapter                 (scalar joint-attn marker)
+// We map the layer path onto sd.cpp's internal FLUX2 names. Only the double-block
+// fused qkv needs sub-slicing (diffusers keeps to_q/to_k/to_v separate; sd.cpp
+// fuses them into img_attn.qkv), everything else is 1:1.
+struct TeamworkKeyInfo {
+    bool ok       = false;  // recognized adapter tensor
+    bool marker   = false;  // ".adapter" scalar marker (ignored)
+    std::string layer;      // internal module path, e.g. "double_blocks.0.img_attn.qkv"
+    int slice     = -1;     // sub-slice index within a fused output (-1 = whole tensor)
+    int num_slices = 1;     // number of sub-slices the fused output splits into
+    enum Param { DOWN,
+                 UP,
+                 BIAS } param = DOWN;
+};
+
+// Match "<prefix><int>." at the start of `name`; on success fill `idx` and `rest`.
+static inline bool tw_match_block(const std::string& name, const std::string& prefix, int& idx, std::string& rest) {
+    if (!starts_with(name, prefix)) {
+        return false;
+    }
+    size_t p = prefix.size();
+    size_t q = name.find('.', p);
+    if (q == std::string::npos || q == p) {
+        return false;
+    }
+    for (size_t i = p; i < q; ++i) {
+        if (!isdigit((unsigned char)name[i])) {
+            return false;
+        }
+    }
+    idx  = std::stoi(name.substr(p, q - p));
+    rest = name.substr(q + 1);
+    return true;
+}
+
+static inline TeamworkKeyInfo parse_teamwork_key(const std::string& key) {
+    TeamworkKeyInfo info;
+
+    // Strip the trailing ".adapter[.<param>]" suffix to recover the layer path.
+    std::string layer;
+    if (ends_with(key, ".adapter.down")) {
+        info.param = TeamworkKeyInfo::DOWN;
+        layer      = key.substr(0, key.size() - std::string(".adapter.down").size());
+    } else if (ends_with(key, ".adapter.up")) {
+        info.param = TeamworkKeyInfo::UP;
+        layer      = key.substr(0, key.size() - std::string(".adapter.up").size());
+    } else if (ends_with(key, ".adapter.bias")) {
+        info.param = TeamworkKeyInfo::BIAS;
+        layer      = key.substr(0, key.size() - std::string(".adapter.bias").size());
+    } else if (ends_with(key, ".adapter")) {
+        info.marker = true;
+        info.ok     = true;  // recognized, but nothing to load
+        return info;
+    } else {
+        return info;  // not a teamwork tensor
+    }
+
+    int n;
+    std::string rest;
+    if (tw_match_block(layer, "single_transformer_blocks.", n, rest)) {
+        std::string base = "single_blocks." + std::to_string(n) + ".";
+        if (rest == "attn.to_qkv_mlp_proj") {
+            info.layer = base + "linear1";  // fused qkv+mlp-in (1:1, pre-fused in ckpt)
+        } else if (rest == "attn.to_out") {
+            info.layer = base + "linear2";  // fused attn-out + mlp-out
+        } else {
+            return info;
+        }
+    } else if (tw_match_block(layer, "transformer_blocks.", n, rest)) {
+        std::string base = "double_blocks." + std::to_string(n) + ".";
+        if (rest == "attn.to_q") {
+            info.layer = base + "img_attn.qkv";
+            info.slice = 0;
+            info.num_slices = 3;
+        } else if (rest == "attn.to_k") {
+            info.layer = base + "img_attn.qkv";
+            info.slice = 1;
+            info.num_slices = 3;
+        } else if (rest == "attn.to_v") {
+            info.layer = base + "img_attn.qkv";
+            info.slice = 2;
+            info.num_slices = 3;
+        } else if (rest == "attn.to_out.0") {
+            info.layer = base + "img_attn.proj";
+        } else if (rest == "ff.linear_in") {
+            info.layer = base + "img_mlp.0";
+        } else if (rest == "ff.linear_out") {
+            info.layer = base + "img_mlp.2";
+        } else {
+            return info;
+        }
+    } else if (layer == "double_stream_modulation_img.linear") {
+        info.layer = "double_stream_modulation_img.lin";
+    } else if (layer == "double_stream_modulation_txt.linear") {
+        info.layer = "double_stream_modulation_txt.lin";
+    } else if (layer == "single_stream_modulation.linear") {
+        info.layer = "single_stream_modulation.lin";
+    } else {
+        return info;
+    }
+
+    info.ok = true;
+    return info;
+}
+
 #endif  // __SD_MODEL_ADAPTER_TEAMWORK_HPP__
