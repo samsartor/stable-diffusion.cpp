@@ -1,0 +1,44 @@
+==PROF== Connected to process 416979 (/mnt/localssd/stable-diffusion.cpp/build/bin/sd-cli)
+[INFO ] stable-diffusion.cpp:412  - loading diffusion model from '/home/colligo/.cache/huggingface/hub/models--black-forest-labs--FLUX.2-klein-4B/snapshots/e7b7dc27f91deacad38e78976d1f2b499d76a294/flux-2-klein-4b.safetensors'
+[INFO ] model_loader.cpp:239  - load /home/colligo/.cache/huggingface/hub/models--black-forest-labs--FLUX.2-klein-4B/snapshots/e7b7dc27f91deacad38e78976d1f2b499d76a294/flux-2-klein-4b.safetensors using safetensors format
+[INFO ] stable-diffusion.cpp:474  - loading llm from '/mnt/localssd/qwen3_4b_te.safetensors'
+[INFO ] model_loader.cpp:239  - load /mnt/localssd/qwen3_4b_te.safetensors using safetensors format
+[INFO ] stable-diffusion.cpp:488  - loading vae from '/home/colligo/.cache/huggingface/hub/models--black-forest-labs--FLUX.2-klein-4B/snapshots/e7b7dc27f91deacad38e78976d1f2b499d76a294/vae/diffusion_pytorch_model.safetensors'
+[INFO ] model_loader.cpp:239  - load /home/colligo/.cache/huggingface/hub/models--black-forest-labs--FLUX.2-klein-4B/snapshots/e7b7dc27f91deacad38e78976d1f2b499d76a294/vae/diffusion_pytorch_model.safetensors using safetensors format
+[INFO ] stable-diffusion.cpp:539  - Version: Flux.2 klein 
+[INFO ] stable-diffusion.cpp:565  - Weight type stat:                      i32: 1    |    bf16: 797  
+[INFO ] stable-diffusion.cpp:566  - Conditioner weight type stat:         bf16: 398  
+[INFO ] stable-diffusion.cpp:567  - Diffusion model weight type stat:     bf16: 149  
+[INFO ] stable-diffusion.cpp:568  - VAE weight type stat:                  i32: 1    |    bf16: 250  
+[INFO ] stable-diffusion.cpp:999  - using VAE for encoding / decoding
+[INFO ] auto_encoder_kl.hpp:527  - vae decoder: ch = 128
+[INFO ] stable-diffusion.cpp:1117 - Using flash attention in the diffusion model
+[INFO ] stable-diffusion.cpp:1233 - total params memory size = 15966.96MB (VRAM 15966.96MB, RAM 0.00MB): text_encoders 8414.50MB(VRAM), diffusion_model 7392.03MB(VRAM), vae 160.43MB(VRAM), controlnet 0.00MB(N/A), extensions 0.00MB(N/A)
+[INFO ] stable-diffusion.cpp:1348 - running in Flux FLOW mode
+[INFO ] stable-diffusion.cpp:4692 - generate_image 512x512
+[INFO ] denoiser.hpp:1079 - get_sigmas with Flux2 scheduler
+[INFO ] stable-diffusion.cpp:3632 - sampling using Euler method
+[INFO ] stable-diffusion.cpp:4174 - EDIT mode
+  |##################################################| 108/108 - 899.48MB/s[K
+[INFO ] model_loader.cpp:1245 - loading tensors completed, taking 0.07s (read: 0.00s, memcpy: 0.00s, convert: 0.00s, copy_to_backend: 0.00s)
+==ERROR== ERR_NVGPUCTRPERM - The user does not have permission to access NVIDIA GPU Performance Counters on the target device 0. For instructions on enabling permissions and to get more information see https://developer.nvidia.com/ERR_NVGPUCTRPERM
+[INFO ] stable-diffusion.cpp:4286 - encode_first_stage completed, taking 2.21s
+  |#########################                         | 144/298 - 4.64GB/s[K  |###########################################       | 256/298 - 8.26GB/s[K  |##################################################| 298/298 - 2.88GB/s[K
+[INFO ] model_loader.cpp:1245 - loading tensors completed, taking 2.02s (read: 0.03s, memcpy: 0.00s, convert: 0.00s, copy_to_backend: 0.31s)
+[INFO ] stable-diffusion.cpp:4390 - get_learned_condition completed, taking 2.45s
+[INFO ] stable-diffusion.cpp:4738 - generating image: 1/1 - seed 42
+  |##################################################| 149/149 - 9.55GB/s[K
+[INFO ] model_loader.cpp:1245 - loading tensors completed, taking 0.76s (read: 0.03s, memcpy: 0.00s, convert: 0.00s, copy_to_backend: 0.10s)
+  |==================================================| 1/1 - 1.20s/it[K
+[INFO ] stable-diffusion.cpp:4770 - sampling completed, taking 1.24s
+[INFO ] stable-diffusion.cpp:4782 - generating 1 latent images completed, taking 1.24s
+[INFO ] stable-diffusion.cpp:4415 - decoding 1 latents
+  |##################################################| 140/140 - 4.02GB/s[K
+[INFO ] model_loader.cpp:1245 - loading tensors completed, taking 0.02s (read: 0.00s, memcpy: 0.00s, convert: 0.00s, copy_to_backend: 0.00s)
+[INFO ] stable-diffusion.cpp:4463 - latent 1 decoded, taking 0.16s
+[INFO ] stable-diffusion.cpp:4467 - decode_first_stage completed, taking 0.16s
+[INFO ] stable-diffusion.cpp:4920 - generate_image completed in 6.05s
+[INFO ] main.cpp:490  - save result image 0 to 'scratchpad/ncu.png' (success)
+[INFO ] main.cpp:562  - 1/1 images saved
+==PROF== Disconnected from process 416979
+==WARNING== No kernels were profiled.
