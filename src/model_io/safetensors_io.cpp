@@ -83,6 +83,64 @@ static ggml_type safetensors_dtype_to_ggml_type(const std::string& dtype) {
     return ttype;
 }
 
+bool read_safetensors_metadata(const std::string& file_path,
+                               std::map<std::string, std::string>& metadata,
+                               std::string* error) {
+    std::ifstream file(file_path, std::ios::binary);
+    if (!file.is_open()) {
+        set_error(error, "failed to open '" + file_path + "'");
+        return false;
+    }
+
+    file.seekg(0, file.end);
+    size_t file_size_ = file.tellg();
+    file.seekg(0, file.beg);
+    if (file_size_ <= ST_HEADER_SIZE_LEN) {
+        set_error(error, "invalid safetensor file '" + file_path + "'");
+        return false;
+    }
+
+    uint8_t header_size_buf[ST_HEADER_SIZE_LEN];
+    file.read((char*)header_size_buf, ST_HEADER_SIZE_LEN);
+    if (!file) {
+        set_error(error, "read safetensors header size failed: '" + file_path + "'");
+        return false;
+    }
+    size_t header_size_ = model_io::read_u64(header_size_buf);
+    if (header_size_ >= file_size_) {
+        set_error(error, "invalid safetensor file '" + file_path + "'");
+        return false;
+    }
+
+    std::vector<char> header_buf;
+    header_buf.resize(header_size_ + 1);
+    header_buf[header_size_] = '\0';
+    file.read(header_buf.data(), header_size_);
+    if (!file) {
+        set_error(error, "read safetensors header failed: '" + file_path + "'");
+        return false;
+    }
+
+    nlohmann::json header_;
+    try {
+        header_ = nlohmann::json::parse(header_buf.data());
+    } catch (const std::exception&) {
+        set_error(error, "parsing safetensors header failed: '" + file_path + "'");
+        return false;
+    }
+
+    metadata.clear();
+    auto it = header_.find("__metadata__");
+    if (it != header_.end() && it->is_object()) {
+        for (auto& kv : it->items()) {
+            if (kv.value().is_string()) {
+                metadata[kv.key()] = kv.value().get<std::string>();
+            }
+        }
+    }
+    return true;
+}
+
 // https://huggingface.co/docs/safetensors/index
 bool read_safetensors_file(const std::string& file_path,
                            std::vector<TensorStorage>& tensor_storages,
