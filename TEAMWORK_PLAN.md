@@ -219,14 +219,73 @@ Done & validated against the real checkpoint:
   (`FLUX2_PLUSATTN, T=3, rank=64, comm=1, text_teammate=1`, roster+ids correct).
 - `teamwork(3/n)`: `parse_teamwork_key()` in `teamwork.hpp` — diffusers→internal FLUX2 map.
   ✅ all 169 tensors map, 0 unrecognized.
+- `teamwork(5/n)`: `TeamworkModel` (GGMLRunner) loader + `TeamworkAdapter` (WeightAdapter) in
+  `model/adapter/teamwork_model.hpp`; `--teamwork <ckpt>` CLI flag (`sd_ctx_params_t.teamwork_path`,
+  common.cpp/.h, defaults/logging); loaded + attached in `stable-diffusion.cpp` (`load_teamwork()`,
+  `attach_teamwork_adapter()` re-asserted at end of `apply_loras` since it shares the diffusion
+  model's single weight_adapter slot with LoRAs — mutually exclusive with LoRA for now). ✅ END-TO-END:
+  `--teamwork` loads the checkpoint (62 layers / 72 projections), attaches, graph builds + runs,
+  produces a correct image. Delta is currently a **no-op** (`TeamworkLayout.valid=false`) — the
+  adapter routes every linear through forward_with_lora but returns nullptr delta, so output ==
+  base. M3 wires the real layout to activate it. GOTCHA fixed: don't do a 2nd load_tensors pass;
+  register_param_tensors+prepare_params load the data (like LoraModel). Modulation layers are
+  loaded but skipped in get_out_diff (M3).
 - `teamwork(4/n)`: `sd_teamwork_lora_delta()` GGML kernel in `model/adapter/teamwork_adapter.hpp`
   + CPU unit test `tests/teamwork_kernel_test.cpp`. ✅ PASS (max err 1.975e-06 vs C++ reference,
   with N=2 batch + text tokens + communication). This is the validated M2 core (per-teammate
   down → shared-hidden sum → per-teammate up, teammate-major image blocks, text→teammate slice).
   Build the test with the §3 standalone recipe (ggml libs only; add `-Iggml/include` for `ggml-cpu.h`).
 
-Milestones (task list): M0 substrate ✅ | M1 loading (naming+config+kernel ✅; loader+CLI next) |
-M2 LoRA engine (kernel ✅; adapter integration next) | M3 wiring+modulation | M4 e2e | M5 generality.
+- `teamwork(6/n)`: **M3 layout wiring — delta now ACTIVE & validated.** Added
+  `WeightAdapter::set_sequence_layout(n_ref_latents, n_txt)` virtual hook (`ggml_extend.hpp`, no-op
+  default; LoRA ignores it). `FluxRunner::build_graph` (flux.hpp ~1511) calls it each build with
+  `ref_latents.size()` + `context->ne[1]`; `TeamworkAdapter::set_sequence_layout` builds a valid
+  `TeamworkLayout` from config (T, text_teammate, communication) and sanity-checks `n_ref+1==T`.
+  **GOTCHA FIXED:** the runner keys linears by FULL path `model.diffusion_model.double_blocks.0.
+  img_attn.qkv.` but our layer map uses bare internal names → `get_out_diff` now strips the
+  `model.diffusion_model.` prefix (was silently returning nullptr → bit-identical to base). ✅
+  VALIDATED: (a) token layout arrives exactly as kernel assumes — DOUBLE x=[3072,768] (image-only,
+  n_txt=0, 768=T·L=3·256), SINGLE x=[3072,1280] (512 text + 768 image); (b) delta active — teamwork
+  output vs base-no-teamwork: 100% pixels changed, mean |Δ|=9.6/255; (c) blue-apple edit matches
+  golden `edited.png` closely. Pixel-level e2e vs golden (~19 MAE) is a WEAK metric (Q8 quant +
+  different VAE/sampler path), barely better than base — do NOT use it as the parity bar; use
+  per-layer delta capture (M4). **Still TODO in M3: per-teammate modulation** (get_out_diff still
+  bails on `modulation` layers; quality already good without it per measure-first fallback).
+  **PER-LAYER PARITY DONE (double-block attn):** offline check `<scratchpad>/teamwork_delta_parity.py`
+  reproduces the golden block-0 delta from checkpoint down/up + golden x using the sd.cpp teammate
+  order [edited=t0, source=t1, mask=t2] with golden batch↔teammate remap [1,2,0]: to_q rel=1.05%,
+  to_k=0.81%, to_v=2.34% (residual = bf16 rounding). WRONG-order control = 123% → the remap is
+  required & correct. Transitively closes correctness: kernel==numpy(1.9e-6, M2) → numpy==golden(~1%)
+  → sd.cpp feeds kernel exact layout (768/1280) in that order. Single-block `to_qkv_mlp_proj` +
+  modulation deltas still un-checked (M4 leftovers).
+
+Milestones: M0 substrate ✅ | M1 loading ✅ (config+naming+loader+`--teamwork` CLI, loads&attaches
+end-to-end) | M2 engine ✅ (kernel validated + integrated as `TeamworkAdapter`) | **M3 layout wiring ✅
+(delta active + layout validated); per-teammate modulation still pending** | M4 e2e parity vs golden
+dump (per-layer delta capture) | M5 generality.
+
+### M3 layout wiring — DONE ✅ (see teamwork(6/n) above)
+Layout is wired via `WeightAdapter::set_sequence_layout` (called from `FluxRunner::build_graph`) →
+`TeamworkAdapter::set_sequence_layout` → `TeamworkModel::set_layout({valid=true,...})`. Delta is
+active; token layout validated (DOUBLE 768 image-only, SINGLE 512+768). Prefix-strip gotcha fixed.
+
+### START HERE (next session): finish M3 modulation, then M4 parity
+1. **Per-teammate modulation** (only remaining M3 item). `get_out_diff` still early-returns on any
+   `modulation` layer. `double_stream_modulation_img.lin` / `single_stream_modulation.lin` take the
+   shared timestep vec (no token axis) but Teamwork wants per-teammate shift/scale/gate. Output must
+   become per-teammate and `modulate()` (flux.hpp ~412) must apply each teammate's mod to its own
+   token block. Klein `share_modulation=True` → one injection point. Golden dump has the target
+   deltas (`double_stream_modulation_img.linear.{x,delta}` [3,·]). Quality already good WITHOUT it
+   (measure-first), so this is a refinement — decide whether it's worth the flux.hpp surgery.
+2. **M4 per-layer parity** (the real correctness bar; pixel e2e is too noisy — see teamwork(6/n)).
+   Use `GGMLRunnerContext::capture_tensor` to dump C++ block-0 deltas for `double_blocks.0.img_attn.qkv`
+   (split into q/k/v, each [3072,768]) and `single_blocks.0.linear1`, then compare to golden
+   `double.block0.attn.to_{q,k,v}.delta` [3,256,3072] and `single.block0...to_qkv_mlp_proj.delta`.
+   REMAP: C++ seq order [edited(t0),source(t1),mask(t2)] ↔ golden batch order [source,mask,edited]
+   (rows [1,2,0]). Validate IMAGE tokens only; text-token deltas expected to differ (§4 caveat).
+   CAVEAT: base is Q8_0 quantized in the C++ run so x differs from bf16 golden → expect ~1% not
+   bit-exact; for a clean kernel check, feed golden `to_q.x` through the kernel offline instead.
+- CAVEAT: teamwork + LoRA share the diffusion weight_adapter slot (mutually exclusive now).
 
 ---
 

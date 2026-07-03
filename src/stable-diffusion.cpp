@@ -19,6 +19,7 @@
 #include "conditioning/conditioner.hpp"
 #include "extensions/generation_extension.h"
 #include "model/adapter/lora.hpp"
+#include "model/adapter/teamwork_model.hpp"
 #include "model/diffusion/anima.hpp"
 #include "model/diffusion/boogu.hpp"
 #include "model/diffusion/control.hpp"
@@ -199,6 +200,9 @@ public:
     std::vector<std::shared_ptr<GenerationExtension>> generation_extensions;
     std::vector<std::shared_ptr<LoraModel>> runtime_lora_models;
     bool apply_lora_immediately = false;
+
+    std::shared_ptr<TeamworkModel> teamwork_model;
+    std::shared_ptr<TeamworkAdapter> teamwork_adapter;
 
     std::string taesd_path;
     sd_tiling_params_t vae_tiling_params = {false, false, 0, 0, 0.5f, 0, 0, nullptr};
@@ -1364,6 +1368,12 @@ public:
             refresh_compvis_denoiser_sigmas();
         }
 
+        if (strlen(SAFE_STR(sd_ctx_params->teamwork_path)) > 0) {
+            if (!load_teamwork(sd_ctx_params->teamwork_path)) {
+                return false;
+            }
+        }
+
         return true;
     }
 
@@ -1604,9 +1614,38 @@ public:
         } else {
             apply_loras_at_runtime(all_loras);
         }
+        // The teamwork adapter shares the diffusion model's single weight_adapter slot
+        // with LoRAs; re-attach it after the per-generation LoRA (re)wiring so it survives.
+        // (LoRA + teamwork on the same model are mutually exclusive for now.)
+        attach_teamwork_adapter();
         int64_t t1 = ggml_time_ms();
         if (!all_loras.empty()) {
             LOG_INFO("apply_loras completed, taking %.2fs", (t1 - t0) * 1.0f / 1000);
+        }
+    }
+
+    bool load_teamwork(const std::string& path) {
+        if (path.empty()) {
+            return true;
+        }
+        if (!ensure_backend_pair(SDBackendModule::DIFFUSION)) {
+            return false;
+        }
+        ggml_backend_t backend = backend_for(SDBackendModule::DIFFUSION);
+        teamwork_model         = std::make_shared<TeamworkModel>(backend, backend, path);
+        if (!teamwork_model->load_from_file(n_threads)) {
+            LOG_ERROR("loading teamwork adapter from '%s' failed", path.c_str());
+            teamwork_model.reset();
+            return false;
+        }
+        teamwork_adapter = std::make_shared<TeamworkAdapter>(teamwork_model);
+        attach_teamwork_adapter();
+        return true;
+    }
+
+    void attach_teamwork_adapter() {
+        if (teamwork_adapter && diffusion_model) {
+            diffusion_model->set_weight_adapter(teamwork_adapter);
         }
     }
 
@@ -2808,6 +2847,7 @@ void sd_ctx_params_init(sd_ctx_params_t* sd_ctx_params) {
     sd_ctx_params->params_backend       = nullptr;
     sd_ctx_params->rpc_servers          = nullptr;
     sd_ctx_params->pulid_weights_path   = nullptr;
+    sd_ctx_params->teamwork_path        = nullptr;
 }
 
 char* sd_ctx_params_to_str(const sd_ctx_params_t* sd_ctx_params) {
@@ -2834,6 +2874,7 @@ char* sd_ctx_params_to_str(const sd_ctx_params_t* sd_ctx_params) {
              "control_net_path: %s\n"
              "photo_maker_path: %s\n"
              "pulid_weights_path: %s\n"
+             "teamwork_path: %s\n"
              "tensor_type_rules: %s\n"
              "n_threads: %d\n"
              "wtype: %s\n"
@@ -2870,6 +2911,7 @@ char* sd_ctx_params_to_str(const sd_ctx_params_t* sd_ctx_params) {
              SAFE_STR(sd_ctx_params->control_net_path),
              SAFE_STR(sd_ctx_params->photo_maker_path),
              SAFE_STR(sd_ctx_params->pulid_weights_path),
+             SAFE_STR(sd_ctx_params->teamwork_path),
              SAFE_STR(sd_ctx_params->tensor_type_rules),
              sd_ctx_params->n_threads,
              sd_type_name(sd_ctx_params->wtype),

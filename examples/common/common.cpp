@@ -454,6 +454,11 @@ ArgOptions SDContextParams::get_options() {
          0,
          &pulid_weights_path},
         {"",
+         "--teamwork",
+         "path to a teamwork adapter checkpoint (samsartor/teamwork)",
+         0,
+         &teamwork_path},
+        {"",
          "--upscale-model",
          "path to esrgan model.",
          0,
@@ -872,6 +877,7 @@ sd_ctx_params_t SDContextParams::to_sd_ctx_params_t(bool taesd_preview) {
     sd_ctx_params.embedding_count                 = static_cast<uint32_t>(embedding_vec.size());
     sd_ctx_params.photo_maker_path                = photo_maker_path.c_str();
     sd_ctx_params.pulid_weights_path              = pulid_weights_path.c_str();
+    sd_ctx_params.teamwork_path                   = teamwork_path.c_str();
     sd_ctx_params.tensor_type_rules               = tensor_type_rules.c_str();
     sd_ctx_params.n_threads                       = n_threads;
     sd_ctx_params.wtype                           = wtype;

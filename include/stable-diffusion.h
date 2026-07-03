@@ -201,6 +201,7 @@ typedef struct {
     uint32_t embedding_count;
     const char* photo_maker_path;
     const char* pulid_weights_path;
+    const char* teamwork_path;
     const char* tensor_type_rules;
     int n_threads;
     enum sd_type_t wtype;

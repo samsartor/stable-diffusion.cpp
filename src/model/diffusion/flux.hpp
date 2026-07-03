@@ -1509,6 +1509,13 @@ namespace Flux {
                 ref_latents.push_back(make_input(ref_latent_tensor));
             }
 
+            // Teamwork (and any layout-aware adapter): publish the per-forward sequence
+            // structure so the communicating-LoRA delta can key on teammate/text blocks.
+            if (weight_adapter && context != nullptr) {
+                weight_adapter->set_sequence_layout(static_cast<int>(ref_latents.size()),
+                                                    static_cast<int>(context->ne[1]));
+            }
+
             GGML_ASSERT(x->ne[3] == 1);
             ggml_cgraph* gf = new_graph_custom(FLUX_GRAPH_SIZE);
 

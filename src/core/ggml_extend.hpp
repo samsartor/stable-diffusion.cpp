@@ -1678,6 +1678,13 @@ struct WeightAdapter {
                                            const std::string& prefix,
                                            ForwardParams forward_params)                                                              = 0;
     virtual size_t get_extra_graph_size()                                                                                             = 0;
+    // Per-forward sequence-axis layout hook. Diffusion runners call this each graph
+    // build with the ref-latent / text-token structure; most adapters ignore it.
+    // Teamwork uses it to activate its communicating-LoRA layout (see teamwork_model.hpp).
+    virtual void set_sequence_layout(int n_ref_latents, int n_txt) {
+        (void)n_ref_latents;
+        (void)n_txt;
+    }
 };
 
 struct GGMLRunnerContext {
